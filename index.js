@@ -5,6 +5,8 @@ import StreamerCard from "../components/StreamerCard";
 import ViewerChart from "../components/ViewerChart";
 import { startChatMonitor, stopChatMonitor } from "../utils/chatMonitor";
 import { useEffect, useState } from "react";
+import { ArrowLeft, Play, Square, ExternalLink, Activity, Clock, Users, TrendingUp, Eye } from "lucide-react"
+import Link from "next/link";
 
 export default function Home() {
   const [streams, setStreams] = useState([]);
@@ -17,7 +19,8 @@ export default function Home() {
   const [sortBy, setSortBy] = useState("viewers");
   const [clipWorthyOnly, setClipWorthyOnly] = useState(false);
   const [selectedGame, setSelectedGame] = useState("All Games");
-
+  const [monitorLog, setMonitorLog] = useState([])
+  const [lastClipUrl, setLastClipUrl] = useState(null);
   const [lookupResult, setLookupResult] = useState(null);
   const [lookupLoading, setLookupLoading] = useState(false);
   const [lookupError, setLookupError] = useState(null);
@@ -52,6 +55,11 @@ export default function Home() {
   };
 
   const [isMonitoring, setIsMonitoring] = useState(false);
+  const [monitoringStreamer, setMonitoringStreamer] = useState(null);
+
+  const logMessage = (msg) => {
+    setMonitorLog((prev) => [...prev.slice(-49), `[${new Date().toLocaleTimeString()}] ${msg}`])
+  }
 
   const ManualClip = async (streamerName) => {
     try {
@@ -92,24 +100,33 @@ export default function Home() {
       }
 
       // Step 3: Start monitor (auto clipper)
-      startChatMonitor(streamerName, token, broadcasterId, async () => {
-        const res = await fetch('/api/create-clip', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            token,
-            broadcasterId,
-            streamerName,
-          }),
-        });
+      startChatMonitor(
+        streamerName,
+        token,
+        broadcasterId,
+        async () => {
+          logMessage(`🚀 Spike detected! Creating clip...`)
+          const res = await fetch("/api/create-clip", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ token, broadcasterId, streamerName }),
+          })
+          const data = await res.json()
+          if (data.url) {
+            setLastClipUrl(data.url)
+            logMessage(`✅ Clip created: ${data.url}`)
+          } else {
+            logMessage(`❌ Clip failed: ${data.error || "Unknown error"}`)
+          }
+        },
+        ({ streamer, count, baseline, spike }) => {
+          logMessage(`[${streamer}] Rate: ${count}/10s | Baseline: ${baseline.toFixed(2)} | Spike: ${spike}`)
+        },
+      )
 
-        const data = await res.json();
-        if (data.url) {
-          alert(`🎉 Clip created for ${streamerName}: ${data.url}`);
-        } else {
-          console.error('Clip failed:', data);
-        }
-      });
+      setIsMonitoring(true);
+      setMonitoringStreamer(streamerName);
+      logMessage(`🚀 Chat monitor started for ${streamerName}`);
 
       alert(`🚀 Chat monitor started for ${streamerName}`);
 
@@ -119,6 +136,63 @@ export default function Home() {
     }
   };
 
+  const toggleMonitor = async (streamerName) => {
+    if (isMonitoring) {
+      stopChatMonitor(streamerName);
+      setIsMonitoring(false);
+      setMonitoringStreamer(null);
+      logMessage(`📴 Chat monitor stopped for ${streamerName}`);
+    } else {
+      try {
+        const tokenRes = await fetch('/api/token');
+        if (!tokenRes.ok) {
+          alert('Authentication failed');
+          return;
+        }
+        const { token } = await tokenRes.json();
+
+        const idRes = await fetch(`/api/user-id?username=${streamerName}&token=${token}`);
+        const { id: broadcasterId } = await idRes.json();
+
+        if (!broadcasterId) {
+          alert('Failed to get broadcaster ID');
+          return;
+        }
+
+        startChatMonitor(
+          streamerName,
+          token,
+          broadcasterId,
+          async () => {
+            logMessage(`🚀 Spike detected! Creating clip...`);
+            const res = await fetch("/api/create-clip", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ token, broadcasterId, streamerName }),
+            });
+            const data = await res.json();
+            if (data.url) {
+              setLastClipUrl(data.url);
+              logMessage(`✅ Clip created: ${data.url}`);
+            } else {
+              logMessage(`❌ Clip failed: ${data.error || "Unknown error"}`);
+            }
+          },
+          ({ streamer, count, baseline, spike }) => {
+            logMessage(`[${streamer}] Rate: ${count}/10s | Baseline: ${baseline.toFixed(2)} | Spike: ${spike}`);
+          }
+        );
+
+        setIsMonitoring(true);
+        setMonitoringStreamer(streamerName);
+        logMessage(`🚀 Chat monitor started for ${streamerName}`);
+      } catch (err) {
+        console.error("Monitor toggle failed:", err);
+        logMessage(`❌ Error: ${err.message}`);
+        alert("Error toggling monitor.");
+      }
+    }
+  };
 
   const closeModal = () => {
     setSelectedStreamer(null);
@@ -278,7 +352,9 @@ export default function Home() {
             <div className="bg-white dark:bg-gray-900 rounded-lg p-6 max-w-4xl w-full max-h-[90vh] overflow-auto">
               <div className="flex justify-between mb-4">
                 <h2 className="text-lg font-bold">
-                  {selectedStreamer.name} – {selectedStreamer.viewers} viewers
+                  <Link href={`/streamers/${selectedStreamer.name}`}>
+                    {selectedStreamer.name} – {selectedStreamer.viewers} viewers
+                  </Link>
                 </h2>
                 <button onClick={closeModal}>✖</button>
               </div>
@@ -300,31 +376,51 @@ export default function Home() {
                         </button>
                       </div>
                       <button
-                        onClick={async () => {
-                          const tokenRes = await fetch('/api/token');
-                          const { token } = await tokenRes.json();
-
-                          const idRes = await fetch(`/api/user-id?username=${selectedStreamer.name}&token=${token}`);
-                          const { id: broadcasterId } = await idRes.json();
-
-                          if (!isMonitoring) {
-                            startChatMonitor(selectedStreamer.name, token, broadcasterId, async () => {
-                              await fetch('/api/create-clip', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ token, broadcasterId, streamerName: selectedStreamer.name }),
-                              });
-                            });
-                            setIsMonitoring(true);
-                          } else {
-                            stopChatMonitor(selectedStreamer.name);
-                            setIsMonitoring(false);
-                          }
-                        }}
+                        onClick={() => toggleMonitor(selectedStreamer.name)}
                         className={`inline-block px-4 py-2 rounded ${isMonitoring ? "bg-red-600" : "bg-green-600"} text-white hover:opacity-90`}
                       >
                         {isMonitoring ? "🛑 Stop Monitor" : "📡 Start Monitor"}
                       </button>
+                    </div>
+
+                    {lastClipUrl && (
+                      <div className="mt-4 p-3 bg-green-100 dark:bg-green-900 rounded-lg">
+                        <p className="text-green-800 dark:text-green-200 flex items-center gap-2">
+                          <Play size={16} />
+                          Latest clip: <a href={lastClipUrl} target="_blank" rel="noopener noreferrer"
+                            className="underline hover:text-green-600 dark:hover:text-green-400 flex items-center gap-1">
+                            Watch <ExternalLink size={14} />
+                          </a>
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="bg-gray-900 border border-gray-700 rounded-lg p-4 mt-4">
+                      <h4 className="text-sm font-medium text-gray-300 mb-3 flex items-center gap-2">
+                        <Activity size={16} />
+                        Activity Log
+                      </h4>
+                      <div className="max-h-64 overflow-y-auto space-y-2">
+                        {monitorLog.length > 0 ? (
+                          monitorLog.map((entry, idx) => (
+                            <div
+                              key={idx}
+                              className="text-sm font-mono text-gray-300 py-2 px-3 bg-gray-800 rounded border-l-4 border-blue-500 hover:border-purple-400 transition-colors duration-200"
+                            >
+                              {entry}
+                            </div>
+                          ))
+                        ) : (
+                          <div className="text-center py-12">
+                            <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mx-auto mb-4">
+                              <Activity className="text-gray-500 w-8 h-8" />
+                            </div>
+                            <p className="text-sm text-gray-500 italic">
+                              No activity logged yet. Start monitoring to see real-time updates.
+                            </p>
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </>
                 </>
